@@ -118,7 +118,7 @@ const Dashboard = {
     await Tasks.loadForUser(user.name);
     await Reports.loadDailyReports({ employeeName: user.name });
     const today      = getTodayDate();
-    const todayTasks = AppState.tasks.filter(t => (t['Date Created']||'').startsWith(today));
+    const todayTasks = AppState.tasks.filter(t => matchesDate(t['Date Created'], today));
     const main       = document.getElementById('main-content');
 
     switch (view) {
@@ -262,7 +262,7 @@ const Dashboard = {
             </div>
           </div>
           ${Object.entries(byEmp).map(([name, tasks]) => {
-            const todayT = tasks.filter(t=>(t['Date Created']||'').startsWith(today));
+            const todayT = tasks.filter(t=>matchesDate(t['Date Created'], today));
             const running = todayT.filter(t=>t['Status']==='In Progress').length;
             return `
               <div class="member-section">
@@ -328,8 +328,8 @@ const Dashboard = {
       }
 
       default: { // TL dashboard
-        const todayTasks = AppState.tasks.filter(t=>(t['Date Created']||'').startsWith(today));
-        const deptToday  = (AppState.deptTasks||[]).filter(t=>(t['Date Created']||'').startsWith(today)&&t['Employee Name']!==tl.name);
+        const todayTasks = AppState.tasks.filter(t=>matchesDate(t['Date Created'], today));
+        const deptToday  = (AppState.deptTasks||[]).filter(t=>matchesDate(t['Date Created'], today)&&t['Employee Name']!==tl.name);
         const ws         = Reports.computeWeekState();
         const running    = deptToday.filter(t=>t['Status']==='In Progress').length;
 
@@ -587,7 +587,7 @@ const Dashboard = {
           <div class="employee-grid">
             ${employees.map(e => {
               const role   = mapPositionToRole(e['Position']);
-              const empT   = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&(t['Date Created']||'').startsWith(today));
+              const empT   = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&matchesDate(t['Date Created'], today));
               const active = empT.filter(t=>t['Status']==='In Progress').length;
               return `<div class="emp-card">
                 <div class="emp-card-top">
@@ -671,7 +671,7 @@ const Dashboard = {
 
       default: { // admin overview
         const running  = allTasks.filter(t=>t['Status']==='In Progress').length;
-        const todayT   = allTasks.filter(t=>(t['Date Created']||'').startsWith(today)).length;
+        const todayT   = allTasks.filter(t=>matchesDate(t['Date Created'], today)).length;
         const allWR    = AppState.weeklyReports || [];
         const lateWR   = allWR.filter(r=>r['Weekly Report Status']==='Late').length;
         const submWR   = allWR.filter(r=>r['Weekly Report Status']==='Submitted').length;
@@ -699,7 +699,7 @@ const Dashboard = {
               </div>
               <div class="emp-status-list">
                 ${employees.slice(0, 8).map(e => {
-                  const empT = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&(t['Date Created']||'').startsWith(today));
+                  const empT = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&matchesDate(t['Date Created'], today));
                   const act  = empT.filter(t=>t['Status']==='In Progress').length;
                   return `<div class="emp-status-row">
                     <div class="mini-avatar">${getInitials(e['Employee Name'])}</div>
