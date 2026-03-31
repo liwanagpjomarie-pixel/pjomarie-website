@@ -118,13 +118,13 @@ const Dashboard = {
     await Tasks.loadForUser(user.name);
     await Reports.loadDailyReports({ employeeName: user.name });
     const today      = getTodayDate();
-    const todayTasks = AppState.tasks.filter(t => matchesDate(t['Date Created'], today));
+    const todayTasks = AppState.tasks.filter(t => matchesDate(getTaskDisplayDate(t), today));
     const main       = document.getElementById('main-content');
 
     switch (view) {
 
       case 'my-tasks': {
-        const all = [...AppState.tasks].sort((a,b)=>new Date(b['Date Created'])-new Date(a['Date Created']));
+        const all = [...AppState.tasks].sort((a,b)=>(_parseToLocal(b['Date Created'])||new Date(0))-(_parseToLocal(a['Date Created'])||new Date(0)));
         main.innerHTML = `
           <div class="page-header">
             <div class="ph-title">
@@ -227,7 +227,7 @@ const Dashboard = {
     switch (view) {
 
       case 'my-tasks': {
-        const all = [...AppState.tasks].sort((a,b)=>new Date(b['Date Created'])-new Date(a['Date Created']));
+        const all = [...AppState.tasks].sort((a,b)=>(_parseToLocal(b['Date Created'])||new Date(0))-(_parseToLocal(a['Date Created'])||new Date(0)));
         main.innerHTML = `
           <div class="page-header">
             <div class="ph-title"><h2>My Tasks</h2><p class="page-sub">${all.length} tasks</p></div>
@@ -262,7 +262,7 @@ const Dashboard = {
             </div>
           </div>
           ${Object.entries(byEmp).map(([name, tasks]) => {
-            const todayT = tasks.filter(t=>matchesDate(t['Date Created'], today));
+            const todayT = tasks.filter(t=>matchesDate(getTaskDisplayDate(t), today));
             const running = todayT.filter(t=>t['Status']==='In Progress').length;
             return `
               <div class="member-section">
@@ -320,7 +320,7 @@ const Dashboard = {
                 <span class="badge bg-slate">${past.length} reports</span>
               </div>
               <div class="past-wr-list">
-                ${past.sort((a,b)=>new Date(b['Week Start'])-new Date(a['Week Start']))
+                ${past.sort((a,b)=>(_parseToLocal(b['Week Start'])||new Date(0))-(_parseToLocal(a['Week Start'])||new Date(0)))
                       .map(wr => Reports.buildWeeklyReportCard(wr)).join('')}
               </div>
             </div>` : ''}`;
@@ -328,8 +328,8 @@ const Dashboard = {
       }
 
       default: { // TL dashboard
-        const todayTasks = AppState.tasks.filter(t=>matchesDate(t['Date Created'], today));
-        const deptToday  = (AppState.deptTasks||[]).filter(t=>matchesDate(t['Date Created'], today)&&t['Employee Name']!==tl.name);
+        const todayTasks = AppState.tasks.filter(t=>matchesDate(getTaskDisplayDate(t), today));
+        const deptToday  = (AppState.deptTasks||[]).filter(t=>matchesDate(getTaskDisplayDate(t), today)&&t['Employee Name']!==tl.name);
         const ws         = Reports.computeWeekState();
         const running    = deptToday.filter(t=>t['Status']==='In Progress').length;
 
@@ -439,7 +439,7 @@ const Dashboard = {
             <span class="badge bg-green">${visibleWR.length} submitted</span>
           </div>
           ${visibleWR.length
-            ? visibleWR.sort((a,b)=>new Date(b['Week Start'])-new Date(a['Week Start']))
+            ? visibleWR.sort((a,b)=>(_parseToLocal(b['Week Start'])||new Date(0))-(_parseToLocal(a['Week Start'])||new Date(0)))
                        .map(wr => Reports.buildWeeklyReportCard(wr, true)).join('')
             : `<div class="empty-callout">
                 <div class="ec-icon">📭</div>
@@ -498,7 +498,7 @@ const Dashboard = {
               </div>`
             : `<div class="dept-report-grid">
                 ${Object.entries(byDept).map(([dept, wrs]) => {
-                  const latest  = wrs.sort((a,b)=>new Date(b['Week Start'])-new Date(a['Week Start']))[0];
+                  const latest  = wrs.sort((a,b)=>(_parseToLocal(b['Week Start'])||new Date(0))-(_parseToLocal(a['Week Start'])||new Date(0)))[0];
                   const deptHrs = wrs.reduce((s,r)=>s+parseFloat(r['Total Hours']||0),0);
                   return `<div class="dept-report-card" onclick="Dashboard.switchView('weekly-report')">
                     <div class="drc-top">
@@ -547,7 +547,7 @@ const Dashboard = {
     switch (view) {
 
       case 'all-tasks': {
-        const sorted = [...allTasks].sort((a,b)=>new Date(b['Date Created'])-new Date(a['Date Created']));
+        const sorted = [...allTasks].sort((a,b)=>(_parseToLocal(b['Date Created'])||new Date(0))-(_parseToLocal(a['Date Created'])||new Date(0)));
         main.innerHTML = `
           <div class="page-header">
             <div class="ph-title"><h2>All Tasks</h2><p class="page-sub">${sorted.length} total across all departments</p></div>
@@ -587,7 +587,7 @@ const Dashboard = {
           <div class="employee-grid">
             ${employees.map(e => {
               const role   = mapPositionToRole(e['Position']);
-              const empT   = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&matchesDate(t['Date Created'], today));
+              const empT   = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&matchesDate(getTaskDisplayDate(t), today));
               const active = empT.filter(t=>t['Status']==='In Progress').length;
               return `<div class="emp-card">
                 <div class="emp-card-top">
@@ -636,7 +636,7 @@ const Dashboard = {
               </div>
             </div>
             ${allWR.length
-              ? allWR.sort((a,b)=>new Date(b['Week Start'])-new Date(a['Week Start']))
+              ? allWR.sort((a,b)=>(_parseToLocal(b['Week Start'])||new Date(0))-(_parseToLocal(a['Week Start'])||new Date(0)))
                      .map(wr=>Reports.buildWeeklyReportCard(wr, false)).join('')
               : '<p class="text-muted">No weekly reports yet.</p>'}
           </div>`;
@@ -671,7 +671,7 @@ const Dashboard = {
 
       default: { // admin overview
         const running  = allTasks.filter(t=>t['Status']==='In Progress').length;
-        const todayT   = allTasks.filter(t=>matchesDate(t['Date Created'], today)).length;
+        const todayT   = allTasks.filter(t=>matchesDate(getTaskDisplayDate(t), today)).length;
         const allWR    = AppState.weeklyReports || [];
         const lateWR   = allWR.filter(r=>r['Weekly Report Status']==='Late').length;
         const submWR   = allWR.filter(r=>r['Weekly Report Status']==='Submitted').length;
@@ -699,7 +699,7 @@ const Dashboard = {
               </div>
               <div class="emp-status-list">
                 ${employees.slice(0, 8).map(e => {
-                  const empT = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&matchesDate(t['Date Created'], today));
+                  const empT = allTasks.filter(t=>t['Employee Name']===e['Employee Name']&&matchesDate(getTaskDisplayDate(t), today));
                   const act  = empT.filter(t=>t['Status']==='In Progress').length;
                   return `<div class="emp-status-row">
                     <div class="mini-avatar">${getInitials(e['Employee Name'])}</div>
