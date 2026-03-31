@@ -14,7 +14,7 @@
 const USE_MOCK_DATA = false; // ← false = real API | true = mock
 
 // ── Real Google Apps Script endpoint ─────────────────────────
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbzH0q6gZFr-2q2g-eio3wfkiG4w46laFF33o5mr_zGrueP_xu-RmIjcfF0ipknu3R0q/exec';
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxUKvZF5IrDXATggoIPbFCnXbDos5gTv0jd-azBc1h9lUQNmmISVWKVx0GGBeCu2V-W/exec';
 
 const GAS_TIMEOUT_MS = 20000;
 
