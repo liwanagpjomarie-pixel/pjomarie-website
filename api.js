@@ -1,20 +1,29 @@
 // ============================================================
-// api.js — DTIM v2.3
-// Changes:
-//  • createTask(): Field work uses Date Started = Scheduled Field Date
-//  • submitFieldProof(): new method — submits proof URL → marks Completed
-//  • Updated FALLBACK_DD from screenshot (added Switched Task, Partial End, Executive)
+// api.js — DTIM v2.2
+// CHANGES:
+//   - createTask()       → saves null for blank fields (not empty string)
+//   - logSession()       → saves null for blank fields
+//   - createDailyReport()→ saves null for blank fields; human-readable dates
+//   - createWeeklyReport()→ saves null for blank fields
+//   - createTravelOrder()→ saves null for blank fields
+//   - generateId()       → now uses readable format from utils.js
+//   - Added uploadFieldWorkProof() action
+//   - Timestamps stored as "Mar 26, 2026 5:35 PM" instead of ISO
 // ============================================================
 
-const USE_MOCK_DATA = false;
+const USE_MOCK_DATA = false; // ← false = real API | true = mock
 
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbzyzrjegaFS5MziHKDrmuXnQfUY5XyhnCbRmMy6EcxZ33H1Owfks1SNP23OkKORDBds/exec';
+// ── Real Google Apps Script endpoint ─────────────────────────
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbzH0q6gZFr-2q2g-eio3wfkiG4w46laFF33o5mr_zGrueP_xu-RmIjcfF0ipknu3R0q/exec';
 
 const GAS_TIMEOUT_MS = 20000;
 
-// ---- Transport ----------------------------------------------
+// ============================================================
+// GAS TRANSPORT LAYER
+// ============================================================
+
 async function _gasGet(params = {}) {
-  const url        = GAS_URL + '?' + new URLSearchParams(params).toString();
+  const url        = GAS_URL + '?' + new URLSearchParams({ ...params }).toString();
   const controller = new AbortController();
   const timeout    = setTimeout(() => controller.abort(), GAS_TIMEOUT_MS);
   try {
@@ -34,9 +43,10 @@ async function _gasPost(body = {}) {
   const timeout    = setTimeout(() => controller.abort(), GAS_TIMEOUT_MS);
   try {
     const res = await fetch(GAS_URL, {
-      method: 'POST', signal: controller.signal,
+      method:  'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(body),
+      body:    JSON.stringify(body),
+      signal:  controller.signal,
     });
     clearTimeout(timeout);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -55,144 +65,128 @@ async function _getSheet(sheetName) {
 
 async function _appendRow(sheetName, data) {
   if (USE_MOCK_DATA) return _mockAppendRow(sheetName, data);
-  return _gasPost({ action: 'appendRow', sheet: sheetName, data: _nullify(data) });
+  return _gasPost({ action: 'appendRow', sheet: sheetName, data });
 }
 
 async function _updateRow(sheetName, idColumn, idValue, data) {
   if (USE_MOCK_DATA) return _mockUpdateRow(sheetName, idColumn, idValue, data);
-  return _gasPost({ action: 'updateRow', sheet: sheetName, idColumn, idValue, data: _nullify(data) });
+  return _gasPost({ action: 'updateRow', sheet: sheetName, idColumn, idValue, data });
 }
 
-// Convert empty/null/undefined → 'null' string for clean DB storage
-function _nullify(obj) {
-  const out = {};
-  Object.entries(obj).forEach(([k, v]) => {
-    out[k] = (v === null || v === undefined || v === '') ? 'null' : v;
-  });
-  return out;
+// ---- Helper: null if blank ─────────────────────────────────
+function _n(v) {
+  // Returns null for blank/undefined so the sheet stores "null" not empty string
+  if (v === null || v === undefined || v === '') return null;
+  return v;
 }
+
+// ---- Human-readable timestamp for storage ──────────────────
+// Stored as "Mar 26, 2026 5:35 PM" — easier to read in sheets
+function _ts() { return formatDateTime(new Date().toISOString()); }
+function _td() { return formatDate(getTodayDate()); }
 
 // ============================================================
 // API METHODS
 // ============================================================
 const API = {
 
-  // ── EMPLOYEES ──────────────────────────────────────────────
+  // ── EMPLOYEE LIST ──────────────────────────────────────────
   async getEmployees() {
-    if (USE_MOCK_DATA) { await _delay(); return _mockStore['EMPLOYEE LIST'] || []; }
-    const res = await _gasGet({ action: 'getSheet', sheet: 'EMPLOYEE LIST' });
+    const res = await _getSheet('EMPLOYEE LIST');
     return (res.data || []).filter(e => e['Is Active'] !== 'false' && e['Is Active'] !== false);
   },
 
   async getEmployeeByEmail(email) {
-    if (USE_MOCK_DATA) {
-      await _delay(300);
-      const n = normalizeEmail(email);
-      return (_mockStore['EMPLOYEE LIST'] || []).find(e => normalizeEmail(e['Email']) === n) || null;
-    }
-    try { const res = await _gasGet({ action: 'getEmployeeByEmail', email }); return res.data || null; }
-    catch { return null; }
+    const normalized = normalizeEmail(email);
+    const employees  = await this.getEmployees();
+    return employees.find(e => normalizeEmail(e['Email']) === normalized) || null;
   },
 
-  // ── DROPDOWNS ──────────────────────────────────────────────
+  // ── DROPDOWN ───────────────────────────────────────────────
   async getDropdowns() {
-    if (USE_MOCK_DATA) return deepClone(FALLBACK_DD);
-    try {
-      const res  = await _gasGet({ action: 'getReferenceData' });
-      const data = res.data || {};
-      return {
-        status:       data.statuses     || FALLBACK_DD.status,
-        actionTypes:  data.actionTypes  || FALLBACK_DD.actionTypes,
-        pauseReasons: data.pauseReasons || FALLBACK_DD.pauseReasons,
-        priorities:   data.priorities   || FALLBACK_DD.priorities,
-        taskTypes:    data.taskTypes    || FALLBACK_DD.taskTypes,
-        access:       data.access       || FALLBACK_DD.access,
-        departments:  data.departments  || FALLBACK_DD.departments,
-        workModes:    data.workModes    || FALLBACK_DD.workModes,
-      };
-    } catch { return deepClone(FALLBACK_DD); }
+    if (USE_MOCK_DATA) return _mockDropdowns();
+    const res  = await _getSheet('DROPDOWN');
+    const rows = res.data || [];
+    return {
+      status:       _extractColumn(rows, 'Status')       || FALLBACK_DD.status,
+      actionTypes:  _extractColumn(rows, 'Action Type')  || FALLBACK_DD.actionTypes,
+      pauseReasons: _extractColumn(rows, 'Pause Reason') || FALLBACK_DD.pauseReasons,
+      priorities:   _extractColumn(rows, 'Priority')     || FALLBACK_DD.priorities,
+      taskTypes:    _extractColumn(rows, 'Task Type')     || FALLBACK_DD.taskTypes,
+      access:       _extractColumn(rows, 'Access')        || FALLBACK_DD.access,
+      departments:  _extractColumn(rows, 'Departments')   || FALLBACK_DD.departments,
+      workModes:    _extractColumn(rows, 'Work Mode')     || FALLBACK_DD.workModes,
+    };
   },
 
   // ── TASKS ──────────────────────────────────────────────────
   async getTasks(filters = {}) {
     const res   = await _getSheet('TASKS');
     let   tasks = res.data || [];
-    if (filters.employeeName)
-      tasks = tasks.filter(t => t['Employee Name'] === filters.employeeName);
-    if (filters.department)
-      tasks = tasks.filter(t => t['Department'] === filters.department);
-    if (filters.status)
-      tasks = tasks.filter(t => t['Status'] === filters.status);
-    // Date filter: checks BOTH Date Created (regular) and Date Started (field tasks scheduled)
-    if (filters.date) {
-      tasks = tasks.filter(t => {
-        const displayDate = getTaskDisplayDate(t);
-        return matchesDate(displayDate, filters.date);
-      });
+    if (filters.employeeName) tasks = tasks.filter(t => t['Employee Name'] === filters.employeeName);
+    if (filters.department)   tasks = tasks.filter(t => t['Department']    === filters.department);
+    if (filters.date)         tasks = tasks.filter(t => (t['Date Created'] || '').startsWith(filters.date));
+    if (filters.status)       tasks = tasks.filter(t => t['Status']        === filters.status);
+    // For field work: also include tasks where Scheduled Field Date === today
+    if (filters.includeFieldForDate) {
+      const fDate = filters.includeFieldForDate;
+      const fieldToday = (res.data || []).filter(t =>
+        t['Work Mode'] === 'Field' &&
+        t['Scheduled Field Date'] === fDate &&
+        !tasks.find(x => x['Task ID'] === t['Task ID'])
+      );
+      tasks = [...tasks, ...fieldToday];
     }
     return tasks;
   },
 
+  // ── Creates a task. Field work saved with Scheduled Field Date.
+  // All blank optional fields saved as null.
   async createTask(data) {
-    // For FIELD tasks:
-    //   Date Created = today (filing date)
-    //   Date Started = scheduledFieldDate (the actual field day — used for dashboard filtering)
-    //   Status       = 'Pending Proof'
-    //   Is Active    = 'true' (appears in task list)
-    // For regular tasks:
-    //   Date Started = 'null' (set later when task is actually started)
-
     const isField = data.workMode === 'Field';
-
     return _appendRow('TASKS', {
       'Task ID':               data.taskId,
       'Employee Name':         data.employeeName,
       'Task Name':             data.taskName,
-      'Task Description':      data.taskDescription || null,
+      'Task Description':      data.taskDescription,
       'Department':            data.department,
       'Task Type':             data.taskType,
+      // Field work starts as "Pending Proof", others "Not Started"
       'Status':                isField ? 'Pending Proof' : 'Not Started',
       'Priority':              data.priority,
-      'Date Created':          todayReadable(),
-      // Field tasks: store scheduled date in Date Started at creation
-      'Date Started':          isField ? (data.scheduledFieldDate || todayReadable()) : null,
+      'Date Created':          _td(),
+      'Date Started':          null,
       'Date Completed':        null,
-      'Latest Update':         nowReadable(),
+      'Latest Update':         _ts(),
       'Is Active':             'true',
       'Daily Accomplishment':  null,
       'Blockers/Issue':        null,
       'Next Step':             null,
       'Work Mode':             data.workMode,
-      'Event / Shoot Details': data.eventDetails || null,
-      'Location / Venue':      data.location     || null,
-      'Proof Link':            null, // Proof submitted later via submitFieldProof
+      // Field work fields
+      'Scheduled Field Date':  isField ? (data.scheduledFieldDate || _n(data.fieldDate)) : null,
+      'Event / Shoot Details': _n(data.eventDetails),
+      'Location / Venue':      _n(data.location),
+      'Proof Link':            _n(data.proofLink),
     });
   },
 
   async updateTask(taskId, updates) {
-    return _updateRow('TASKS', 'Task ID', taskId, { ...updates, 'Latest Update': nowReadable() });
+    return _updateRow('TASKS', 'Task ID', taskId, {
+      ...updates,
+      'Latest Update': _ts(),
+    });
   },
 
-  // ── FIELD WORK: SUBMIT PROOF ────────────────────────────────
-  // When employee submits proof link → task auto-completes
-  async submitFieldProof(taskId, proofLink, employeeName) {
-    if (USE_MOCK_DATA) {
-      await _delay(300);
-      const task = (_mockStore['TASKS'] || []).find(t => t['Task ID'] === taskId);
-      if (task) {
-        task['Proof Link']    = proofLink;
-        task['Status']        = 'Completed';
-        task['Is Active']     = 'false';
-        task['Date Completed']= nowReadable();
-        task['Latest Update'] = nowReadable();
-      }
-      return { success: true };
-    }
-    return _gasPost({
-      action:       'submitFieldProof',
-      taskId,
-      proofLink,
-      employeeName,
+  // ── Upload proof for field work → auto-complete the task
+  async uploadFieldWorkProof(taskId, proofLink, employeeName) {
+    // Update task: set Proof Link, Status = Completed, Date Completed
+    return _updateRow('TASKS', 'Task ID', taskId, {
+      'Proof Link':       proofLink,
+      'Status':           'Completed',
+      'Date Completed':   _td(),
+      'Is Active':        'false',
+      'Latest Update':    _ts(),
     });
   },
 
@@ -202,50 +196,42 @@ const API = {
       'Session ID':    generateId('SES'),
       'Task ID':       data.taskId,
       'Employee Name': data.employeeName,
-      'Date':          todayReadable(),
+      'Date':          _td(),
       'Action Type':   data.actionType,
-      'Timestamp':     nowReadable(),
-      'Pause Reason':  data.pauseReason || null,
-      'Action Notes':  data.notes       || null,
+      'Timestamp':     _ts(),
+      'Pause Reason':  _n(data.pauseReason),
+      'Action Notes':  _n(data.notes),
     });
+  },
+
+  async getSessionsByTask(taskId) {
+    const res = await _getSheet('TASK SESSIONS');
+    return (res.data || []).filter(s => s['Task ID'] === taskId);
   },
 
   // ── DAILY REPORTS ──────────────────────────────────────────
   async getDailyReports(filters = {}) {
     const res  = await _getSheet('DAILY REPORTS');
     let   rpts = res.data || [];
-    if (filters.employeeName)
-      rpts = rpts.filter(r => r['Employee Name'] === filters.employeeName);
-    if (filters.date)
-      rpts = rpts.filter(r => matchesDate(r['Report Date'], filters.date));
-    if (filters.finalized)
-      rpts = rpts.filter(r =>
-        r['Daily report Status']  === 'Finalized' ||
-        r['Daily Report Status']  === 'Finalized'
-      );
+    if (filters.employeeName) rpts = rpts.filter(r => r['Employee Name'] === filters.employeeName);
+    if (filters.department)   rpts = rpts.filter(r => r['Department']    === filters.department);
+    if (filters.date)         rpts = rpts.filter(r => (r['Report Date']  || '').startsWith(filters.date));
+    if (filters.finalized)    rpts = rpts.filter(r => r['Daily Report Status'] === 'Finalized');
     return rpts;
-  },
-
-  async getDailyReportsByDept(department) {
-    const deptEmp = (AppState.employees || [])
-      .filter(e => e['Department'] === department)
-      .map(e => e['Employee Name']);
-    const res = await _getSheet('DAILY REPORTS');
-    return (res.data || []).filter(r => deptEmp.includes(r['Employee Name']));
   },
 
   async createDailyReport(data) {
     return _appendRow('DAILY REPORTS', {
       'Report ID':           generateId('DR'),
       'Employee Name':       data.employeeName,
-      'Report Date':         todayReadable(),
+      'Report Date':         _td(),
       'Total Active Hours':  data.totalHours,
-      'Tasks Worked On':     data.tasksWorkedOn  || null,
-      'Completed Tasks':     data.completedTasks || null,
-      'Ongoing Tasks':       data.ongoingTasks   || null,
-      'Pause Reasons':       data.pauseReasons   || null,
+      'Tasks Worked On':     _n(data.tasksWorkedOn),
+      'Completed Tasks':     _n(data.completedTasks),
+      'Ongoing Tasks':       _n(data.ongoingTasks),
+      'Pause Reasons':       _n(data.pauseReasons),
       'Daily Summary':       data.summary,
-      'Finalized At':        nowReadable(),
+      'Finalized At':        _ts(),
       'Daily report Status': 'Finalized',
     });
   },
@@ -254,36 +240,35 @@ const API = {
   async getWeeklyReports(filters = {}) {
     const res  = await _getSheet('WEEKLY REPORTS');
     let   rpts = res.data || [];
-    if (filters.department)
-      rpts = rpts.filter(r => r['Department'] === filters.department);
-    if (filters.weekStart)
-      rpts = rpts.filter(r => matchesDate(r['Week Start'], filters.weekStart));
-    // Management filter: only 'Submitted' (on-time)
-    if (filters.finalized)
-      rpts = rpts.filter(r =>
-        r['Weekly Report Status'] === 'Submitted' ||
-        r['Weekly Report Status'] === 'Finalized'
-      );
+    if (filters.department) rpts = rpts.filter(r => r['Department']           === filters.department);
+    if (filters.weekStart)  rpts = rpts.filter(r => r['Week Start']           === filters.weekStart);
+    if (filters.finalized)  rpts = rpts.filter(r => r['Weekly Report Status'] === 'Finalized');
     return rpts;
   },
 
   async createWeeklyReport(data) {
+    // Status logic:
+    //   'Submitted' = submitted on/before Friday 5:00 PM → visible to Management
+    //   'Late'      = submitted after deadline → hidden from Management
+    const submittedAt = new Date().toISOString();
+    const status      = (data.weeklyStatus) || (isSubmittedOnTime(data.weekStart, submittedAt) ? 'Submitted' : 'Late');
+
     return _appendRow('WEEKLY REPORTS', {
-      'Report ID':            generateId('WR'),
-      'Department':           data.department,
-      'Team Leader':          data.teamLeaderName,
-      'Week Start':           data.weekStart,
-      'Week End':             data.weekEnd,
-      'Total Staff':          data.totalStaff,
-      'Total Hours':          data.totalHours,
-      'Completed Tasks':      data.completedTasks || null,
-      'Ongoing Tasks':        data.ongoingTasks   || null,
-      'Pause Reasons':        null,
-      'WeeklySummary':        data.summary,
-      'Recommendations':      data.recommendations || null,
-      'Finalized At':         nowReadable(),
-      'Weekly Report Status': data.weeklyStatus || 'Submitted',
-      'PDF Link':             null,
+      'Report ID':             generateId('WR'),
+      'Department':            data.department,
+      'Team Leader':           data.teamLeaderName,
+      'Week Start':            formatDate(data.weekStart),
+      'Week End':              formatDate(data.weekEnd),
+      'Total Staff':           data.totalStaff,
+      'Total Hours':           data.totalHours,
+      'Completed Tasks':       _n(data.completedTasks),
+      'Ongoing Tasks':         _n(data.ongoingTasks),
+      'Pause Reasons':         _n(data.pauseReasons),
+      'WeeklySummary':         data.summary,
+      'Recommendations':       _n(data.recommendations),
+      'Finalized At':          _ts(),
+      'Weekly Report Status':  status,
+      'PDF Link':              null,
     });
   },
 
@@ -291,24 +276,25 @@ const API = {
   async getTravelOrders(filters = {}) {
     const res    = await _getSheet('TRAVEL ORDERS');
     let   orders = res.data || [];
-    if (filters.employeeName)
-      orders = orders.filter(o => o['Employee Name'] === filters.employeeName);
+    if (filters.employeeName) orders = orders.filter(o => o['Employee Name'] === filters.employeeName);
     return orders;
   },
 
   async createTravelOrder(data) {
+    const budget    = parseFloat(data.budget) || 0;
+    const finAppr   = budget > 0 ? 'Pending' : 'N/A';
     return _appendRow('TRAVEL ORDERS', {
       'Travel Order ID':      generateId('TO'),
       'Employee Name':        data.employeeName,
-      'Position':             data.position     || null,
-      'Department':           data.department   || null,
+      'Position':             _n(data.position),
+      'Department':           _n(data.department),
       'Destination':          data.destination,
-      'Date':                 data.date || todayReadable(),
+      'Date':                 formatDate(data.date || getTodayDate()),
       'Purpose':              data.purpose,
-      'Budget':               data.budget       || null,
-      'Funding Source':       data.fundingSource|| null,
+      'Budget':               budget || null,
+      'Funding Source':       _n(data.fundingSource),
       'Team Leader Approval': 'Pending',
-      'Finance Approval':     'Pending',
+      'Finance Approval':     finAppr,
       'Status':               'Pending',
       'Attachment/PDF Link':  null,
     });
@@ -316,38 +302,40 @@ const API = {
 };
 
 // ============================================================
+// HELPERS
+// ============================================================
+
+function _extractColumn(rows, colName) {
+  const vals = rows.map(r => r[colName]).filter(v => v != null && v !== '');
+  return vals.length > 0 ? vals : null;
+}
+
+// ============================================================
 // FALLBACK DROPDOWN VALUES
-// Matches screenshot of DROPDOWN sheet (Image 6)
 // ============================================================
 const FALLBACK_DD = {
   status:       ['Not Started', 'In Progress', 'Paused', 'Completed', 'Cancelled', 'Pending Proof'],
   actionTypes:  ['Start', 'Pause', 'Resume', 'End'],
-  pauseReasons: ['Break', 'Lunch', 'Waiting for Approval', 'Waiting for Files',
-                 'Meeting', 'Coordination', 'System Issue', 'Personal Reason',
-                 'Switched Task', 'Partial End'],
+  pauseReasons: ['Break', 'Lunch', 'Waiting for Approval', 'Waiting for Files', 'Meeting', 'Coordination', 'System Issue', 'Personal Reason'],
   priorities:   ['Low', 'Medium', 'High', 'Urgent'],
-  taskTypes:    ['Admin Operations', 'HR Operations', 'IT Operations',
-                 'Finance Operations', 'System Development', 'SOP Creation',
-                 'Support Task', 'Coordination', 'System Monitoring'],
+  taskTypes:    ['Admin Operations', 'HR Operations', 'IT Operations', 'Finance Operations', 'System Development', 'SOP Creation', 'Support Task', 'Coordination', 'System Monitoring'],
   access:       ['Admin Access', 'Team Leader', 'Staff', 'Management'],
-  departments:  ['Admin Operations', 'Nexis', 'Main Campaign',
-                 'Community Builder', 'IT Operations', 'Finance Operations', 'Executive'],
+  departments:  ['Admin Operations', 'Nexis', 'Main Campaign', 'Community Builder', 'IT Operations', 'Finance Operations'],
   workModes:    ['Office', 'Remote', 'Field'],
 };
 
 // ============================================================
 // MOCK MODE
 // ============================================================
+
+function _mockDropdowns() { return FALLBACK_DD; }
+
 const _mockStore = {
   'EMPLOYEE LIST': [
-    { 'Employee ID':'20240107', 'Employee Name':'LIWANAG, PJOMARIE D.', 'Department':'IT Operations',
-      'Email':'pjomarieliwanag.rdr@gmail.com', 'Position':'Staff', 'Assigned Team Leader / Reports To':'DELOBERJES, ANGELOKING A.', 'Is Active':'true' },
-    { 'Employee ID':'20240101', 'Employee Name':'DELOBERJES, ANGELOKING A.', 'Department':'IT Operations',
-      'Email':'angelokingdeloberjes.rdr@gmail.com', 'Position':'Team Leader', 'Assigned Team Leader / Reports To':'', 'Is Active':'true' },
-    { 'Employee ID':'20210002', 'Employee Name':'DELOS REYES, MARIA THERESA L.', 'Department':'Executive',
-      'Email':'mariatheresadelosreyes.rdr@gmail.com', 'Position':'Management', 'Assigned Team Leader / Reports To':'', 'Is Active':'true' },
-    { 'Employee ID':'ADM001', 'Employee Name':'Admin User', 'Department':'Admin Operations',
-      'Email':'admin@company.ph', 'Position':'Admin Access', 'Assigned Team Leader / Reports To':'', 'Is Active':'true' },
+    { 'Employee ID':'1', 'Employee Name':'Pjomarie Liwanag', 'Department':'IT Operations', 'Email':'pjomarieliwanag.rdr@gmail.com', 'Position':'Staff',       'Assigned Team Leader / Reports To':'Bongbong Marcos', 'Is Active':'true' },
+    { 'Employee ID':'2', 'Employee Name':'Juan Dela Cruz',   'Department':'IT Operations', 'Email':'jdc@gmail.com',                 'Position':'Management', 'Assigned Team Leader / Reports To':'',                'Is Active':'true' },
+    { 'Employee ID':'3', 'Employee Name':'Bongbong Marcos',  'Department':'IT Operations', 'Email':'bbm@gmail.com',                 'Position':'Team Leader','Assigned Team Leader / Reports To':'',                'Is Active':'true' },
+    { 'Employee ID':'4', 'Employee Name':'Admin User',       'Department':'Admin Operations','Email':'admin@gmail.com',            'Position':'Admin Access','Assigned Team Leader / Reports To':'',                'Is Active':'true' },
   ],
   'TASKS':          [],
   'TASK SESSIONS':  [],
@@ -356,12 +344,11 @@ const _mockStore = {
   'TRAVEL ORDERS':  [],
 };
 
-function _delay(ms = 150) { return new Promise(r => setTimeout(r, ms)); }
-function _mockGetSheet(n) { return Promise.resolve({ success:true, data: deepClone(_mockStore[n]||[]) }); }
-function _mockAppendRow(n, data) { if (!_mockStore[n]) _mockStore[n]=[]; _mockStore[n].push(data); return Promise.resolve({success:true}); }
-function _mockUpdateRow(n, idCol, idVal, updates) {
-  if (!_mockStore[n]) return Promise.resolve({success:false});
-  const idx = _mockStore[n].findIndex(r => r[idCol]===idVal);
-  if (idx>=0) _mockStore[n][idx] = { ..._mockStore[n][idx], ...updates };
-  return Promise.resolve({success:true});
+function _mockGetSheet(name)    { return Promise.resolve({ success: true, data: _mockStore[name] || [] }); }
+function _mockAppendRow(n, d)   { if (!_mockStore[n]) _mockStore[n] = []; _mockStore[n].push(d); return Promise.resolve({ success: true }); }
+function _mockUpdateRow(n, c, v, u) {
+  if (!_mockStore[n]) return Promise.resolve({ success: false });
+  const i = _mockStore[n].findIndex(r => r[c] === v);
+  if (i >= 0) _mockStore[n][i] = { ..._mockStore[n][i], ...u };
+  return Promise.resolve({ success: true });
 }
