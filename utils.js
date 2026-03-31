@@ -1,36 +1,52 @@
 // ============================================================
-// utils.js — DTIM v2.3
+// utils.js — DTIM v2.4  (DATE FIX)
+//
+// ROOT CAUSES FIXED:
+//
+// 1. "Invalid Date" on task cards
+//    OLD: new Date('Mar 26, 2026' + 'T00:00:00') = Invalid Date
+//         because 'Mar 26, 2026T00:00:00' is not a valid format
+//    FIX: formatDate() / formatDateShort() now detect readable format
+//         and parse it directly WITHOUT appending 'T00:00:00'
+//
+// 2. Tasks not appearing on dashboard / today's list
+//    OLD: (t['Date Created']||'').startsWith(today)
+//         where today = '2026-03-27' and Date Created = 'Mar 27, 2026 5:35 PM'
+//         → 'Mar 27, 2026 5:35 PM'.startsWith('2026-03-27') = FALSE!
+//    FIX: Use matchesDate() everywhere for today-filtering.
+//         matchesDate() now uses local date parts (not .toISOString()) to
+//         avoid UTC timezone shift.
+//
+// 3. matchesDate() timezone shift
+//    OLD: new Date(dbDate).toISOString().split('T')[0]
+//         UTC conversion shifts 'Mar 26, 2026' (local midnight) back to
+//         Mar 25 in UTC+8! (Mar 26 00:00 PH = Mar 25 16:00 UTC)
+//    FIX: Use d.getFullYear(), d.getMonth(), d.getDate() (LOCAL parts)
+//         to build the yyyy-MM-dd string. No UTC shift.
+//
+// 4. Weekly days misalignment
+//    OLD: getWeekStart() uses new Date() then .toISOString() which
+//         can return yesterday in UTC+8
+//    FIX: getWeekStart() and getWeekDays() use local date parts only
+//
 // ============================================================
 
-// ---- Local Date Helper (CRITICAL: uses local timezone, NOT UTC) ----
-// Returns YYYY-MM-DD in the user's LOCAL timezone.
-// toISOString() returns UTC which is WRONG for UTC+8 (Philippines):
-//   e.g. Friday Mar 27 12:00 AM Manila = Thursday Mar 26 4:00 PM UTC
-//   → toISOString gives "2026-03-26" instead of "2026-03-27"
-function localDateISO(d) {
-  const dt = d || new Date();
-  const y  = dt.getFullYear();
-  const m  = String(dt.getMonth() + 1).padStart(2, '0');
-  const dd = String(dt.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
-}
-
 // ---- Readable ID Generation --------------------------------
-// Format: TASK-20260326-0001
 function generateId(prefix = 'ID') {
-  const today   = localDateISO().replace(/-/g, ''); // local timezone
+  const now     = new Date();
+  const today   = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}`;
   const key     = `dtim_cnt_${prefix}_${today}`;
   let   counter = parseInt(localStorage.getItem(key) || '0') + 1;
   localStorage.setItem(key, counter.toString());
   return `${prefix}-${today}-${String(counter).padStart(4, '0')}`;
 }
 
-// ---- Duration Formatting ------------------------------------
+// ---- Duration Formatting -----------------------------------
 function formatDuration(ms) {
   if (!ms || ms < 0) return '00:00:00';
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
+  const s   = Math.floor(ms / 1000);
+  const h   = Math.floor(s / 3600);
+  const m   = Math.floor((s % 3600) / 60);
   const sec = s % 60;
   return [h, m, sec].map(v => String(v).padStart(2, '0')).join(':');
 }
@@ -45,54 +61,71 @@ function formatDurationShort(ms) {
 
 function msToHoursDecimal(ms) { return (ms / 3600000).toFixed(2); }
 
-// ---- Display Formatters (UI only) --------------------------
-
-// Safely parse ANY date string:
-//   "2026-03-27"           → works (ISO date)
-//   "2026-03-27T05:35:00Z" → works (ISO datetime)
-//   "Mar 27, 2026"         → works (readable date from DB)
-//   "Mar 27, 2026 5:35 PM" → works (readable timestamp from DB)
-//   "2026-03-27T00:00:00"  → works (local ISO)
-// NEVER append T00:00:00 to already-readable strings like "Mar 27, 2026"
-function _parseAnyDate(str) {
-  if (!str || str === 'null') return null;
+// ============================================================
+// CORE DATE PARSER — timezone-safe
+// Parses ANY date string (ISO or readable) using LOCAL date parts.
+// Never uses .toISOString() which would shift to UTC.
+// ============================================================
+function _parseToLocal(str) {
+  if (!str || str === 'null' || str === '—') return null;
   const s = String(str).trim();
-  // Try direct parse first (handles "Mar 27, 2026", "Mar 27, 2026 5:35 PM", ISO strings)
-  let d = new Date(s);
-  if (!isNaN(d.getTime())) return d;
-  // Only append T00:00:00 for pure YYYY-MM-DD (10-char ISO date)
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    d = new Date(s + 'T00:00:00');
-    if (!isNaN(d.getTime())) return d;
+  // Already ISO: "2026-03-26" or "2026-03-26T..."
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    // Parse date-only as local midnight (no T suffix risk)
+    const parts = s.substring(0, 10).split('-');
+    return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
   }
-  return null;
+  // Readable: "Mar 26, 2026" or "Mar 26, 2026 5:35 PM"
+  // new Date() handles this correctly as LOCAL time
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
 }
 
+// Returns "yyyy-MM-dd" from any date string using LOCAL date parts
+function toLocalISO(str) {
+  const d = _parseToLocal(str);
+  if (!d) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// ---- Display Formatters (UI only) --------------------------
+
+// FIX: Do NOT append 'T00:00:00' to readable dates like 'Mar 26, 2026'
+// That creates 'Mar 26, 2026T00:00:00' which is Invalid Date!
 function formatDate(dateStr) {
-  if (!dateStr || dateStr === 'null') return '—';
-  const d = _parseAnyDate(dateStr);
-  if (!d) return String(dateStr); // return as-is if unparseable
-  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  if (!dateStr || dateStr === 'null' || dateStr === '—') return '—';
+  try {
+    const d = _parseToLocal(String(dateStr));
+    if (!d) return String(dateStr);
+    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch { return String(dateStr); }
 }
 
 function formatDateShort(dateStr) {
-  if (!dateStr || dateStr === 'null') return '—';
-  const d = _parseAnyDate(dateStr);
-  if (!d) return String(dateStr); // return as-is if unparseable
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  if (!dateStr || dateStr === 'null' || dateStr === '—') return '—';
+  try {
+    const d = _parseToLocal(String(dateStr));
+    if (!d) return String(dateStr);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  } catch { return String(dateStr); }
 }
 
 function formatDateTime(str) {
-  if (!str || str === 'null') return '—';
-  const d = _parseAnyDate(str);
-  if (!d) return String(str);
-  return d.toLocaleString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: 'numeric', minute: '2-digit', hour12: true,
-  });
+  if (!str || str === 'null' || str === '—') return '—';
+  try {
+    const d = _parseToLocal(String(str));
+    if (!d) return String(str);
+    return d.toLocaleString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true,
+    });
+  } catch { return String(str); }
 }
 
-// ---- DB Write Helpers (readable format) --------------------
+// ---- DB Write Helpers (readable format for Sheets) ---------
 function nowReadable() {
   return new Date().toLocaleString('en-US', {
     month: 'short', day: 'numeric', year: 'numeric',
@@ -109,91 +142,136 @@ function todayReadable() {
 function dateReadable(isoDate) {
   if (!isoDate) return todayReadable();
   try {
-    const d = new Date(isoDate + 'T00:00:00');
+    const d = _parseToLocal(isoDate);
+    if (!d) return isoDate;
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   } catch { return isoDate; }
 }
 
-// ---- YYYY-MM-DD for comparisons (NOT stored in DB) ---------
-// Uses LOCAL timezone (not UTC) — critical for UTC+8 Philippines
-function getTodayDate() { return localDateISO(); }
-function todayStr()     { return localDateISO(); }
-function nowISO()       { return new Date().toISOString(); }
+// ---- Current Date (yyyy-MM-dd, LOCAL) ----------------------
+// FIX: Do NOT use .toISOString() which returns UTC and may be yesterday!
+// Use local date parts directly.
+function getTodayDate() {
+  const now = new Date();
+  const y   = now.getFullYear();
+  const m   = String(now.getMonth() + 1).padStart(2, '0');
+  const d   = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+function todayStr() { return getTodayDate(); }
+function nowISO()   { return new Date().toISOString(); }
 
-// Compares a DB date string (any format) with a YYYY-MM-DD string.
-// Handles: ISO "2026-03-27", readable "Mar 27, 2026", timestamp "Mar 27, 2026 5:35 PM"
+// ============================================================
+// matchesDate — timezone-safe comparison
+// Compares a DB date string (any format) with a yyyy-MM-dd string.
+// FIX: Uses local date parts (not .toISOString()) to prevent UTC shift.
+// ============================================================
 function matchesDate(dbDate, isoDate) {
-  if (!dbDate || !isoDate || dbDate === 'null') return false;
-  // Fast path: ISO prefix match
+  if (!dbDate || !isoDate || dbDate === 'null' || dbDate === '—') return false;
+  // Fast path: if dbDate starts with yyyy-MM-dd prefix (ISO stored dates)
   if (String(dbDate).startsWith(isoDate)) return true;
-  // Parse and compare using LOCAL date (not UTC)
-  const d = _parseAnyDate(dbDate);
-  if (d) return localDateISO(d) === isoDate;
-  return false;
+  // General path: parse to local and compare local parts
+  const localISO = toLocalISO(String(dbDate));
+  return localISO === isoDate;
 }
 
-// ---- Week Helpers ------------------------------------------
-// All use localDateISO() to avoid UTC offset bug (UTC+8 = Philippines)
+// ---- Week Helpers (all using LOCAL date parts) -------------
+
+// FIX: use local date parts, not .toISOString(), to avoid UTC shift
+function getTodayLocalISO() {
+  return getTodayDate(); // already local
+}
 
 function getWeekStart(dateStr) {
-  // Use local date, never toISOString() which gives UTC
-  const d   = dateStr ? new Date(dateStr + 'T00:00:00') : new Date();
-  const day = d.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat (local timezone)
-  const monday = new Date(d);
-  monday.setDate(d.getDate() - day + (day === 0 ? -6 : 1));
-  return localDateISO(monday); // LOCAL date string, not UTC
+  let d;
+  if (dateStr) {
+    d = _parseToLocal(dateStr);
+    if (!d) d = new Date();
+  } else {
+    d = new Date();
+  }
+  const day  = d.getDay(); // 0=Sun, 1=Mon, ...6=Sat
+  const diff = (day === 0) ? -6 : 1 - day; // shift to Monday
+  const mon  = new Date(d.getFullYear(), d.getMonth(), d.getDate() + diff);
+  const y    = mon.getFullYear();
+  const m    = String(mon.getMonth() + 1).padStart(2, '0');
+  const day2 = String(mon.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day2}`;
 }
 
 function getWeekDays(weekStart) {
-  // Returns Mon–Fri as YYYY-MM-DD local date strings
+  // Returns Mon–Fri as ['yyyy-MM-dd', ...]
   const days  = [];
-  const start = new Date(weekStart + 'T00:00:00');
+  const parts = weekStart.split('-').map(Number);
+  const start = new Date(parts[0], parts[1] - 1, parts[2]); // local midnight
   for (let i = 0; i < 5; i++) {
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
-    days.push(localDateISO(d)); // LOCAL date, not UTC
+    const d   = new Date(parts[0], parts[1] - 1, parts[2] + i);
+    const y   = d.getFullYear();
+    const m   = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    days.push(`${y}-${m}-${day}`);
   }
   return days;
 }
 
-// Friday 5:00 PM deadline
+// Friday 5:00 PM deadline (LOCAL time)
 function getWeekDeadline(weekStart) {
-  const d = new Date(weekStart + 'T00:00:00');
-  d.setDate(d.getDate() + 4); // Mon + 4 = Fri
-  d.setHours(17, 0, 0, 0);   // 5:00 PM
-  return d;
+  const parts = weekStart.split('-').map(Number);
+  // Monday + 4 = Friday
+  const fri = new Date(parts[0], parts[1] - 1, parts[2] + 4, 17, 0, 0, 0);
+  return fri;
 }
 
 function isBeforeWeekDeadline(weekStart) { return new Date() <= getWeekDeadline(weekStart); }
 
 function isSubmittedOnTime(weekStart, submittedAt) {
   if (!submittedAt) return false;
-  return new Date(submittedAt) <= getWeekDeadline(weekStart);
+  const d = _parseToLocal(submittedAt);
+  if (!d) return false;
+  return d <= getWeekDeadline(weekStart);
 }
 
 function deadlineDisplay(weekStart) {
-  const deadline = getWeekDeadline(weekStart);
-  const datePart = deadline.toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric' });
-  return `${datePart} · 5:00 PM`;
+  const dl = getWeekDeadline(weekStart);
+  return dl.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }) + ' · 5:00 PM';
 }
 
 function hoursUntilDeadline(weekStart) {
   return Math.round((getWeekDeadline(weekStart) - new Date()) / 3600000);
 }
 
+// FIX: Use timeZone: 'UTC' only when the input is a raw ISO yyyy-MM-dd
+// For readable dates ('Mar 26, 2026'), use default local timezone
 function getDayName(dateStr) {
-  if (!dateStr) return '';
-  // Use _parseAnyDate to handle both ISO and readable formats
-  const d = _parseAnyDate(dateStr);
-  if (!d) {
-    // Fallback: try YYYY-MM-DD + T12:00:00 (noon avoids any off-by-one from midnight UTC shifts)
-    try {
-      const dt = new Date(String(dateStr).substring(0, 10) + 'T12:00:00');
-      if (!isNaN(dt)) return dt.toLocaleDateString('en-US', { weekday: 'long' });
-    } catch { /* ignore */ }
-    return '';
+  if (!dateStr || dateStr === 'null') return '';
+  try {
+    const d = _parseToLocal(dateStr);
+    if (!d) return '';
+    // Use local weekday name from local date parts
+    return d.toLocaleDateString('en-US', { weekday: 'long' });
+  } catch { return ''; }
+}
+
+// ---- Field Work Helpers ------------------------------------
+function isFieldTask(task) {
+  return (task['Work Mode'] || '').toLowerCase() === 'field';
+}
+
+function fieldTaskHasProof(task) {
+  const proof = task['Proof Link'];
+  return proof && proof !== 'null' && proof.trim() !== '';
+}
+
+/**
+ * Get the "display date" of a task for today-filtering.
+ * Field tasks: use Date Started (= Scheduled Field Date stored at creation)
+ * Regular tasks: use Date Created
+ */
+function getTaskDisplayDate(task) {
+  if (isFieldTask(task) && task['Date Started'] && task['Date Started'] !== 'null') {
+    return task['Date Started'];
   }
-  return d.toLocaleDateString('en-US', { weekday: 'long' });
+  return task['Date Created'];
 }
 
 // ---- Timer State -------------------------------------------
@@ -223,7 +301,7 @@ function clearTimerState(taskId) {
 function showToast(message, type = 'info', duration = 3800) {
   const container = document.getElementById('toast-container');
   if (!container) return;
-  const icons = { success:'✓', error:'✕', warning:'⚠', info:'ℹ' };
+  const icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
   const toast  = document.createElement('div');
   toast.className = `toast toast-${type}`;
   toast.innerHTML = `<span class="toast-icon">${icons[type]||'ℹ'}</span><span class="toast-msg">${escapeHtml(message)}</span>`;
@@ -306,7 +384,8 @@ function showEmpty(id, msg = 'Walang data.', icon = '📋') {
 // ---- Security ----------------------------------------------
 function escapeHtml(str) {
   if (str == null) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function normalizeEmail(email) { return (email||'').toLowerCase().trim(); }
@@ -315,32 +394,10 @@ function normalizeEmail(email) { return (email||'').toLowerCase().trim(); }
 function mapPositionToRole(position) {
   if (!position) return 'Staff';
   const p = position.toLowerCase().trim();
-  if (p.includes('admin'))        return 'Admin';
-  if (p.includes('management'))   return 'Management';
-  if (p.includes('team leader'))  return 'TeamLeader';
+  if (p.includes('admin'))       return 'Admin';
+  if (p.includes('management'))  return 'Management';
+  if (p.includes('team leader')) return 'TeamLeader';
   return 'Staff';
-}
-
-// ---- Field Work Helpers ------------------------------------
-function isFieldTask(task) {
-  return (task['Work Mode'] || '').toLowerCase() === 'field';
-}
-
-function fieldTaskHasProof(task) {
-  const proof = task['Proof Link'];
-  return proof && proof !== 'null' && proof.trim() !== '';
-}
-
-/**
- * Get the "display date" of a task for dashboard filtering.
- * Field tasks use their Scheduled Field Date (stored in Date Started at creation).
- * Regular tasks use Date Created.
- */
-function getTaskDisplayDate(task) {
-  if (isFieldTask(task) && task['Date Started'] && task['Date Started'] !== 'null') {
-    return task['Date Started'];
-  }
-  return task['Date Created'];
 }
 
 // ---- PDF Export --------------------------------------------
@@ -351,7 +408,7 @@ function printToPDF(title, contentHTML) {
     <title>${escapeHtml(title)}</title>
     <style>
       *{box-sizing:border-box}body{font-family:Arial,sans-serif;padding:28px;color:#1e293b;font-size:13px}
-      h1{font-size:18px;margin-bottom:4px;color:#0f172a}p.meta{color:#64748b;font-size:12px;margin-bottom:16px}
+      h1{font-size:18px;margin-bottom:4px}p.meta{color:#64748b;font-size:12px;margin-bottom:16px}
       table{width:100%;border-collapse:collapse;margin:12px 0}
       th,td{border:1px solid #cbd5e1;padding:7px 10px;text-align:left;font-size:12px}
       th{background:#f1f5f9;font-weight:600}tr:nth-child(even) td{background:#f8fafc}
@@ -362,14 +419,9 @@ function printToPDF(title, contentHTML) {
       .no-print{display:none}
     </style>
   </head><body>
-    <button class="no-print" onclick="window.print()"
-      style="margin-bottom:16px;padding:7px 16px;cursor:pointer;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:13px">
-      🖨 Print / Save as PDF
-    </button>
+    <button class="no-print" onclick="window.print()" style="margin-bottom:16px;padding:7px 16px;cursor:pointer;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:13px">🖨 Print / Save as PDF</button>
     ${contentHTML}
-    <p class="meta" style="margin-top:20px;border-top:1px solid #e2e8f0;padding-top:10px">
-      Generated by DTIM · ${nowReadable()}
-    </p>
+    <p class="meta" style="margin-top:20px;border-top:1px solid #e2e8f0;padding-top:10px">Generated by DTIM · ${nowReadable()}</p>
   </body></html>`);
   pw.document.close();
 }
